@@ -1,0 +1,98 @@
+trigger:
+  branches:
+    include:
+      - '*'
+
+pr: none
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  buildConfiguration: 'Release'
+
+steps:
+
+- checkout: self
+
+- task: UseDotNet@2
+  displayName: 'Install .NET 9 SDK'
+  inputs:
+    packageType: 'sdk'
+    version: '9.x'
+
+- task: NuGetAuthenticate@1
+  displayName: 'Authenticate to Azure Artifacts'
+
+- task: PowerShell@2
+  displayName: 'Locate solution and NuGet configuration'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $solution = Get-ChildItem "$(Build.SourcesDirectory)" -Recurse -Filter *.slnx |
+        Select-Object -First 1
+
+      $nugetConfig = Get-ChildItem "$(Build.SourcesDirectory)" -Recurse -Filter nuget.config |
+        Select-Object -First 1
+
+      if (-not $solution) {
+          throw "No .slnx solution was found in the repository."
+      }
+
+      if (-not $nugetConfig) {
+          throw "No nuget.config was found in the repository."
+      }
+
+      Write-Host "Solution found: $($solution.FullName)"
+      Write-Host "NuGet configuration found: $($nugetConfig.FullName)"
+
+      Write-Host "##vso[task.setvariable variable=SolutionPath]$($solution.FullName)"
+      Write-Host "##vso[task.setvariable variable=NuGetConfigPath]$($nugetConfig.FullName)"
+
+- task: PowerShell@2
+  displayName: 'Restore dependencies'
+  inputs:
+    targetType: 'inline'
+    script: |
+      dotnet restore "$(SolutionPath)" `
+        --configfile "$(NuGetConfigPath)"
+
+      if ($LASTEXITCODE -ne 0) {
+          exit $LASTEXITCODE
+      }
+
+- task: PowerShell@2
+  displayName: 'Build solution'
+  inputs:
+    targetType: 'inline'
+    script: |
+      dotnet build "$(SolutionPath)" `
+        --configuration "$(buildConfiguration)" `
+        --no-restore
+
+      if ($LASTEXITCODE -ne 0) {
+          exit $LASTEXITCODE
+      }
+
+- task: PowerShell@2
+  displayName: 'Run tests'
+  inputs:
+    targetType: 'inline'
+    script: |
+      dotnet test "$(SolutionPath)" `
+        --configuration "$(buildConfiguration)" `
+        --no-build `
+        --logger "trx;LogFileName=test-results.trx" `
+        --results-directory "$(Agent.TempDirectory)\TestResults"
+
+      if ($LASTEXITCODE -ne 0) {
+          exit $LASTEXITCODE
+      }
+
+- task: PublishTestResults@2
+  displayName: 'Publish test results'
+  inputs:
+    testResultsFormat: 'VSTest'
+    testResultsFiles: '$(Agent.TempDirectory)/TestResults/**/*.trx'
+    failTaskOnFailedTests: true
+    testRunTitle: 'GiftOfTheGivers Automated Tests'
